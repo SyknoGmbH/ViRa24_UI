@@ -15,9 +15,26 @@ The software is designed to work witht the ViRa24 vital sign sensing radar and c
  - Setting of all filter parameters
  - Setting of all system parameters
  - Saving raw data of all channels
+ 
+# Windows executable
+For an easy start without an installed python environment, a windows executable is available in the folder *windows_project*.
+ 
+# Python project
+The full source code is available in the folder *python_project*. The required packages can be installed with the following command: 
+```console 
+pip install pip install -r requirements.txt
+```
+
+The ViRa24 GUI can be started with the following command:
+```console 
+python3 main.py
+```
+
+Under Linux, *sudo* privileges are required to allow accessing the data port.
+
 
 # Maintainer
-This project is maintained by Sykno GmbH. For more information and inquiries, please visit [www.sykno-rf.de.](www.sykno-rf.de) 
+This project is maintained by Sykno GmbH. For more information and inquiries, please visit [www.sykno.de.](www.sykno.de) 
 
 # Disclaimer
 This software comes with no warranty. 
