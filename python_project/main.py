@@ -59,7 +59,7 @@ class MainWindow(QtWidgets.QMainWindow):
     def __init__(self):
         
         # software version
-        self.ver = 1.1
+        self.ver = 1.2
         
         # sampling rate
         self.fs = 1e3
@@ -126,8 +126,23 @@ class MainWindow(QtWidgets.QMainWindow):
         self.ecg2_buffer = np.zeros(self.buffer_length)
         self.ana1_buffer = np.zeros(self.buffer_length)
         self.ana2_buffer = np.zeros(self.buffer_length)
-     
-        
+        self.idata = np.zeros(self.buffer_length)
+        self.qdata = np.zeros(self.buffer_length)
+        self.idata_corrected = np.zeros(self.buffer_length)
+        self.qdata_corrected = np.zeros(self.buffer_length)
+        self.displacement = np.zeros(self.buffer_length)
+        self.distance_breath = np.zeros(self.buffer_length)
+        self.distance_pulse = np.zeros(self.buffer_length)
+        self.distance_heartsound = np.zeros(self.buffer_length)
+        self.hs1 = np.zeros(self.buffer_length)
+        self.hs2 = np.zeros(self.buffer_length)
+        self.ecg = np.zeros(self.buffer_length)
+        self.last_breath_logged = None
+        self.last_pulse_logged = None
+        self.last_heart_logged = None
+        self.last_hs1_logged = None
+        self.last_hs2_logged = None
+
     # initialize filters for data processing
     def init_filter(self):
         
@@ -138,7 +153,9 @@ class MainWindow(QtWidgets.QMainWindow):
         fc_breath_high = self.spin_fc_max_breath.value()
         fc_pulse_high = self.spin_fc_max_pulse.value()
         fc_heart_high = self.spin_fc_max_heart.value()
-        
+        fc_ecg_main = 60 if self.radio_fc_ecg_us.isChecked() else 50
+        fc_ecg_harmonic = 120 if self.radio_fc_ecg_us.isChecked() else 100
+
         # filter order
         order = 2
 
@@ -149,9 +166,9 @@ class MainWindow(QtWidgets.QMainWindow):
         
         # ecg filter coefficients
         # 50 Hz notch filter
-        self.filter1_ecg_b, self.filter1_ecg_a = iirnotch(w0=50, Q=5, fs=self.fs)
+        self.filter1_ecg_b, self.filter1_ecg_a = iirnotch(w0=fc_ecg_main, Q=5, fs=self.fs)
         # 100 Hz notch filter
-        self.filter2_ecg_b, self.filter2_ecg_a = iirnotch(w0=100, Q=20, fs=self.fs)
+        self.filter2_ecg_b, self.filter2_ecg_a = iirnotch(w0=fc_ecg_harmonic, Q=20, fs=self.fs)
         # ECG lowpass filter
         self.filter3_ecg_b, self.filter3_ecg_a = butter(order, 40, btype='lowpass', analog=False, fs=self.fs)    
         
@@ -361,6 +378,7 @@ class MainWindow(QtWidgets.QMainWindow):
             self.button_startstop.setText("Stop")
             self.checkbox_log.setEnabled(False)
             self.combobox_filename.setEnabled(False)
+            self.button_connect.setEnabled(False)
             
             # create and open log file
             if self.logging:
@@ -374,13 +392,16 @@ class MainWindow(QtWidgets.QMainWindow):
                         self.start_stop()
                         return
                    
-                self.logfile_handle = open(self.save_file, 'w')
+                self.logfile_handle = open(self.save_file, 'a+')
                 self.lineedit_filename.setText(str(self.save_file))
 
                 self.logfile_handle.write("# Created with Sykno's ViRa24, UI version " + str(self.ver) + "\n")
                 self.logfile_handle.write("# Start time: " + datetime.now().strftime("%Y-%m-%d %H-%M-%S")+ "\n")
-                self.logfile_handle.write("# Format: I,Q,ECG1,ECG2,ANA1,ANA2"+ "\n")
                 self.logfile_handle.write("# Sample rate: " + str(int(self.fs)) + " Sa/s"+ "\n")
+                self.logfile_handle.write("# Format:\n" +
+                                          "I_raw,Q_raw,ECG1_raw,ECG2_raw,ANA1_raw,ANA2_raw,"                                # Raw data
+                                          "Distance_breath,Distance_pulse,Distance_heartsound,HS1_AC,HS2_AC,ECG_filtered" + # Processed data
+                                          "\n")
             
             # start thread for data reception
             self.com_thread = Thread(target=self.com_read)
@@ -396,7 +417,8 @@ class MainWindow(QtWidgets.QMainWindow):
             self.button_startstop.setText("Start")
             self.checkbox_log.setEnabled(True)
             self.combobox_filename.setEnabled(True)
-            
+            self.button_connect.setEnabled(True)
+
             # close logfile
             if self.logging and self.logfile_handle:
                 self.logfile_handle.close()
@@ -429,7 +451,8 @@ class MainWindow(QtWidgets.QMainWindow):
                 else:
                     # append to buffer
                     raw_buffer += new_data
-            except:
+            except Exception as e:
+                print(e)
                 self.signalComm.msg_box.emit("COM port timeout.\nDid you choose the right COM port?")
                 self.set_ui_connected(False)
                 self.start_stop()
@@ -468,128 +491,184 @@ class MainWindow(QtWidgets.QMainWindow):
                                  
                 sample_cnt += 2
                            
-                # update and log 20 times per second (= every 50 samples @1kSps)
+                # trigger plot update 20 times per second (= every 50 samples @1kSps)
                 framerate = 20
                 frame_smaplecnt = int(self.fs/framerate)
                                 
                 if np.mod(sample_cnt, frame_smaplecnt) == 0:
+
+                    self.idata = self.i_buffer / 2 ** 24 * 4
+                    self.qdata = self.q_buffer / 2 ** 24 * 4
+                    if not self.ac_coupling:
+                        self.idata_corrected = self.idata - self.offset_i
+                        self.qdata_corrected = self.qdata - self.offset_q
+                        # calculate iq phase angle
+                        phi = np.arctan2(self.qdata_corrected, self.idata_corrected)
+                        phi_linear = np.unwrap(phi)
+                        # calculate displacement
+                        self.displacement = (phi_linear * c) / (4 * np.pi * self.f_transmit) * 1e3
+
+                        self.distance_breath = filtfilt(self.filter_breath_b, self.filter_breath_a, self.displacement)
+                        self.distance_pulse = filtfilt(self.filter_pulse_b, self.filter_pulse_a, self.displacement)
+                        self.distance_heartsound = filtfilt(self.filter_heart_b, self.filter_heart_a, self.displacement)
+                        self.hs1 = np.nan*np.zeros(self.buffer_length)
+                        self.hs2 = np.nan*np.zeros(self.buffer_length)
+                        ecg = self.ecg2_buffer - self.ecg1_buffer
+                        ecg = filtfilt(self.filter1_ecg_b, self.filter1_ecg_a, ecg)
+                        ecg = filtfilt(self.filter2_ecg_b, self.filter2_ecg_a, ecg)
+                        ecg = filtfilt(self.filter3_ecg_b, self.filter3_ecg_a, ecg)
+                        ecg = ecg - np.mean(ecg)
+                        self.ecg = ecg / np.max(np.abs(ecg[200:-200]))
+                    else:
+                        self.distance_breath = np.nan*np.zeros(self.buffer_length)
+                        self.distance_pulse = np.nan*np.zeros(self.buffer_length)
+                        self.distance_heartsound = np.nan*np.zeros(self.buffer_length)
+                        # update heart sounds
+                        self.hs1 = filtfilt(self.filter_heart_b, self.filter_heart_a, self.idata)
+                        self.hs2 = filtfilt(self.filter_heart_b, self.filter_heart_a, self.qdata)
+                        ecg = self.ecg2_buffer - self.ecg1_buffer
+                        ecg = filtfilt(self.filter1_ecg_b, self.filter1_ecg_a, ecg)
+                        ecg = filtfilt(self.filter2_ecg_b, self.filter2_ecg_a, ecg)
+                        ecg = filtfilt(self.filter3_ecg_b, self.filter3_ecg_a, ecg)
+                        ecg = ecg - np.mean(ecg)
+                        ecg = ecg / np.max(np.abs(ecg[200:-200]))
+                        self.ecg = ecg
                     # trigger plot updates
                     self.signalComm.request_graph_update.emit()   
-                    # log data
+
+                # trigger logging and automatic offset estimation every 2.5 seconds
+                offset_correction_period = 2.5
+                offset_correction_framecnt = int(self.fs*offset_correction_period)
+                if np.mod(sample_cnt, offset_correction_framecnt) == 0:
+                    # trigger logging every offset correction frame (last 2.5 seconds is logged)
                     if self.logging:
-                        for k in range(frame_smaplecnt):
-                            self.logfile_handle.write(str(int(self.i_buffer[-frame_smaplecnt + k])) + "," +
-                                                      str(int(self.q_buffer[-frame_smaplecnt + k])) + "," +
-                                                      str(int(self.ecg1_buffer[-frame_smaplecnt + k])) + "," +
-                                                      str(int(self.ecg2_buffer[-frame_smaplecnt + k])) + "," +
-                                                      str(int(self.ana1_buffer[-frame_smaplecnt + k])) + "," +
-                                                      str(int(self.ana2_buffer[-frame_smaplecnt + k])) + "\n"
-                                                      )                 
-                # trigger automatic offset estimation every 2.5 seconds
-                if np.mod(sample_cnt, 2500) == 0 and sample_cnt > self.buffer_length and self.auto_offset:
-                    # select random points for correction
-                    selected_points = np.random.choice(np.arange(0, self.buffer_length), 10)
-                    # estimate offset
-                    offset_points_i = self.i_buffer[selected_points]
-                    offset_points_q = self.q_buffer[selected_points]
-                    offset = estimate_offset(offset_points_i, offset_points_q)
-                    offset_i_new = offset[0] / 2 ** 24 * 4
-                    offset_q_new = offset[1] / 2 ** 24 * 4
-                    
-                    if self.offset_i == 0:
-                        # if offset was not set before
-                        self.get_offset()
-                    else:
-                        # calculate offset error and trigger offset update, if threshold eceeded
-                        threshold = 0.2
-                        deviation_i = np.abs((self.offset_i - offset_i_new)/self.offset_i)
-                        deviation_q = np.abs((self.offset_q - offset_q_new)/self.offset_q)
-                        if deviation_i > threshold or deviation_q > threshold:
+                        # Slice for the block we want to log (excludes last 200 samples) to avoid filter edge effects
+                        # E.g. from index `-2700` up to `-200`.
+                        logging_slice = slice(-(offset_correction_framecnt + 200), -200)
+
+                        # Identify the first new samples in this block (index 0 of logging_slice)
+                        breath_new_first = self.distance_breath[logging_slice][0]
+                        pulse_new_first = self.distance_pulse[logging_slice][0]
+                        heart_new_first = self.distance_heartsound[logging_slice][0]
+                        hs1_new_first = self.hs1[logging_slice][0]
+                        hs2_new_first = self.hs2[logging_slice][0]
+
+                        # Compute continuity shifts, if we have previously logged data
+                        if self.last_breath_logged is not None:
+                            shift_breath = self.last_breath_logged - breath_new_first
+                            shift_pulse = self.last_pulse_logged - pulse_new_first
+                            shift_heartsound = self.last_heart_logged - heart_new_first
+                            shift_hs1 = self.last_hs1_logged - hs1_new_first
+                            shift_hs2 = self.last_hs2_logged - hs2_new_first
+                        else:
+                            # If this is first time logging, no shift needed
+                            shift_breath = shift_pulse = shift_heartsound = shift_hs1 = shift_hs2 = 0
+
+                        # Prepare the data array with needed shifts and scaling for heart
+                        data = np.column_stack([
+                            self.i_buffer[logging_slice],
+                            self.q_buffer[logging_slice],
+                            self.ecg1_buffer[logging_slice],
+                            self.ecg2_buffer[logging_slice],
+                            self.ana1_buffer[logging_slice],
+                            self.ana2_buffer[logging_slice],
+                            self.distance_breath[logging_slice] + shift_breath,
+                            self.distance_pulse[logging_slice] + shift_pulse,
+                            self.distance_heartsound[logging_slice] * 1e3 + shift_heartsound,
+                            self.hs1[logging_slice] + shift_hs1,
+                            self.hs2[logging_slice] + shift_hs2,
+                            self.ecg[logging_slice],
+                        ])
+
+                        # Save the data to CSV with full double precision
+                        np.savetxt(self.logfile_handle, data, delimiter=",", fmt="%.17g")
+
+                        # Update internal state based on the final row in the newly logged block
+                        # (We don’t apply the 1e3 scaling here for heart)
+                        self.last_breath_logged = data[-1][6]
+                        self.last_pulse_logged = data[-1][7]
+                        self.last_heart_logged = self.distance_heartsound[-201] + shift_heartsound
+                        self.last_hs1_logged = data[-1][9]
+                        self.last_hs2_logged = data[-1][10]
+
+                    # do offset correction
+                    if self.auto_offset and sample_cnt > self.buffer_length and not self.ac_coupling:
+                        # select random points for correction
+                        selected_points = np.random.choice(np.arange(0, self.buffer_length), 10)
+                        # estimate offset
+                        offset_points_i = self.i_buffer[selected_points]
+                        offset_points_q = self.q_buffer[selected_points]
+                        offset = estimate_offset(offset_points_i, offset_points_q)
+                        offset_i_new = offset[0] / 2 ** 24 * 4
+                        offset_q_new = offset[1] / 2 ** 24 * 4
+                        
+                        if self.offset_i == 0:
+                            # if offset was not set before
                             self.get_offset()
+                        else:
+                            # calculate offset error and trigger offset update, if threshold eceeded
+                            threshold = 0.2
+                            deviation_i = np.abs((self.offset_i - offset_i_new)/self.offset_i)
+                            deviation_q = np.abs((self.offset_q - offset_q_new)/self.offset_q)
+                            if deviation_i > threshold or deviation_q > threshold:
+                                self.get_offset()
 
 
     # update graphs
     def update_graph(self):
         
         time_axis = np.linspace(-self.time_window, 0, self.buffer_length)
-        idata = self.i_buffer / 2 ** 24 * 4
-        qdata = self.q_buffer / 2 ** 24 * 4
-         
+
         # if dc coupling is active
         if not self.ac_coupling:
-            # subtract offset
-            idata_corrected = idata - self.offset_i
-            qdata_corrected = qdata - self.offset_q
-            # calculate iq phase angle
-            phi = np.arctan2(qdata_corrected, idata_corrected)
-            phi_linear = np.unwrap(phi)
-            # calculate displacement
-            displacement = (phi_linear * c) / (4 * np.pi * self.f_transmit) * 1e3
             # update displacement plot
             if self.identify_tab() == 0:
-                self.plotline_displacement.setData(time_axis, displacement)
+                self.plotline_displacement.setData(time_axis, self.displacement)
             # update spectrum plot
             if self.identify_tab() == 1:
                 f_axis = np.fft.rfftfreq(n=self.buffer_length, d=1/self.fs)
-                spectrum_i = np.abs(np.fft.rfft(idata-np.mean(idata)))/self.buffer_length *1e3
-                spectrum_q = np.abs(np.fft.rfft(qdata-np.mean(idata)))/self.buffer_length *1e3
+                spectrum_i = np.abs(np.fft.rfft(self.idata-np.mean(self.idata)))/self.buffer_length *1e3
+                spectrum_q = np.abs(np.fft.rfft(self.qdata-np.mean(self.qdata)))/self.buffer_length *1e3
                 self.plotline_spectrum_i.setData(f_axis, spectrum_i)
                 self.plotline_spectrum_q.setData(f_axis, spectrum_q)
             # update vital sign plots
             if self.identify_tab() == 2:
-                distance_breath = filtfilt(self.filter_breath_b, self.filter_breath_a, displacement)
-                distance_pulse = filtfilt(self.filter_pulse_b, self.filter_pulse_a, displacement)
-                distance_heart = filtfilt(self.filter_heart_b, self.filter_heart_a, displacement)
-                self.plotline_breath.setData(time_axis, distance_breath)
-                self.plotline_pulse.setData(time_axis, distance_pulse)
-                self.plotline_heartsounds.setData(time_axis, distance_heart*1e3)
-                # filter and plot ecg signal
-                ecg = self.ecg2_buffer - self.ecg1_buffer
-                ecg = filtfilt(self.filter1_ecg_b, self.filter1_ecg_a, ecg)
-                ecg = filtfilt(self.filter2_ecg_b, self.filter2_ecg_a, ecg)
-                ecg = filtfilt(self.filter3_ecg_b, self.filter3_ecg_a, ecg)
-                ecg = ecg - np.mean(ecg)
-                ecg = ecg / np.max(np.abs(ecg[200:-200]))
-                self.plotline_ecg.setData(time_axis[200:-200], ecg[200:-200])
+                self.plotline_breath.setData(time_axis, self.distance_breath)
+                self.plotline_pulse.setData(time_axis, self.distance_pulse)
+                self.plotline_heartsounds.setData(time_axis, self.distance_heartsound*1e3)
+                # plot ecg signal
+                self.plotline_ecg.setData(time_axis[200:-200], self.ecg[200:-200])
             # update iq plots
             if self.identify_tab() == 3:
                 # update i and q over time
-                self.plotline_iq_i.setData(time_axis, idata)
-                self.plotline_iq_q.setData(time_axis, qdata)
+                self.plotline_iq_i.setData(time_axis, self.idata)
+                self.plotline_iq_q.setData(time_axis, self.qdata)
                 # plot ellipse
-                self.plotline_ellipse.setData(idata_corrected, qdata_corrected)
-        
+                self.plotline_ellipse.setData(self.idata_corrected, self.qdata_corrected)
+
         # if ac coupling is active
         else:
             # update spectrum plot
             if self.identify_tab() == 1:
                 f_axis = np.fft.rfftfreq(n=self.buffer_length, d=1/self.fs)
-                spectrum_i = np.abs(np.fft.rfft(idata-np.mean(idata)))/self.buffer_length *1e3
-                spectrum_q = np.abs(np.fft.rfft(qdata-np.mean(idata)))/self.buffer_length *1e3
+                spectrum_i = np.abs(np.fft.rfft(self.idata-np.mean(self.idata)))/self.buffer_length *1e3
+                spectrum_q = np.abs(np.fft.rfft(self.qdata-np.mean(self.qdata)))/self.buffer_length *1e3
                 self.plotline_spectrum_i.setData(f_axis, spectrum_i)
-                self.plotline_spectrum_q.setData(f_axis, spectrum_q)     
+                self.plotline_spectrum_q.setData(f_axis, spectrum_q)
             if self.identify_tab() == 2:
                 # update heart sounds
-                hs1 = filtfilt(self.filter_heart_b, self.filter_heart_a, idata)
-                hs2 = filtfilt(self.filter_heart_b, self.filter_heart_a, qdata)
-                self.plotline_heartsounds.setData(time_axis, hs1)
-                self.plotline_heartsounds_ac.setData(time_axis, hs2)
-                # filter and plot ecg signal
-                ecg = self.ecg2_buffer - self.ecg1_buffer
-                ecg = filtfilt(self.filter1_ecg_b, self.filter1_ecg_a, ecg)
-                ecg = filtfilt(self.filter2_ecg_b, self.filter2_ecg_a, ecg)
-                ecg = filtfilt(self.filter3_ecg_b, self.filter3_ecg_a, ecg)
-                ecg = ecg - np.mean(ecg)
-                ecg = ecg / np.max(np.abs(ecg[200:-200]))
-                self.plotline_ecg.setData(time_axis[200:-200], ecg[200:-200])
-            # update iq plots     
+                self.plotline_heartsounds.setData(time_axis, self.hs1)
+                self.plotline_heartsounds_ac.setData(time_axis, self.hs2)
+                # plot ecg signal
+                self.plotline_ecg.setData(time_axis[200:-200], self.ecg[200:-200])
+            # update iq plots
             if self.identify_tab() == 3:
                 # update i and q over time
-                self.plotline_iq_i.setData(time_axis, idata)
-                self.plotline_iq_q.setData(time_axis, qdata)
+                self.plotline_iq_i.setData(time_axis, self.idata)
+                self.plotline_iq_q.setData(time_axis, self.qdata)
                 # plot ellipse
-                self.plotline_ellipse.setData(idata, qdata)
-        
+                self.plotline_ellipse.setData(self.idata, self.qdata)
+
     # get offset of current iq data buffers
     def get_offset(self):
         
@@ -716,7 +795,6 @@ class MainWindow(QtWidgets.QMainWindow):
  
         else:
             # connected -> disconnect
-            self.start_stop()
             self.com_obj.close()
             self.com_obj = None
             self.set_ui_connected(False)

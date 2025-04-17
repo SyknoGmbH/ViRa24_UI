@@ -32,11 +32,11 @@ def estimate_offset(Idata, Qdata):
     for m in range(len(iq_complex_rotated)):
         for n in range(m, len(iq_complex_rotated)):
             if m != n:
-                try:
+                if (iq_complex_rotated[m] - iq_complex_rotated[n]).real == 0:
+                    kx[ind] = 0
+                else:
                     kx[ind] = (abs(iq_complex_rotated[m]) ** 2 - abs(iq_complex_rotated[n]) ** 2) / \
                               (2 * (iq_complex_rotated[m] - iq_complex_rotated[n]).real)
-                except RuntimeWarning:
-                    kx[ind] = 0
                 ind += 1
     kx = kx[~np.isnan(kx)]
     if kx.size != 0:

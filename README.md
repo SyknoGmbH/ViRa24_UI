@@ -32,6 +32,13 @@ python3 main.py
 
 Under Linux, *sudo* privileges are required to allow accessing the data port.
 
+# Change log
+
+| Version | Date | Comment |
+|---|---|---|
+| 1.0 | 09.08.2023 | Initial version |
+| 1.1 | 21.03.2025 | Added Windows executable; <br/>Upgrade to PyQt6 |
+| 1.2 | 17.04.2025 | Added feature to log processed data; <br/> Added ECG noise suppression option for US (60 Hz)|
 
 # Maintainer
 This project is maintained by Sykno GmbH. For more information and inquiries, please visit [www.sykno.de.](www.sykno.de) 
